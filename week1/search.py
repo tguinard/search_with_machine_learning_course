@@ -22,16 +22,37 @@ def process_filters(filters_input):
     for filter in filters_input:
         type = request.args.get(filter + ".type")
         display_name = request.args.get(filter + ".displayName", filter)
+        key = request.args.get(filter + ".key", filter)
+        from_ = request.args.get(filter + ".from", filter)
+        to = request.args.get(filter + ".to", filter)
         #
         # We need to capture and return what filters are already applied so they can be automatically added to any existing links we display in aggregations.jinja2
         applied_filters += "&filter.name={}&{}.type={}&{}.displayName={}".format(filter, filter, type, filter,
                                                                                  display_name)
-        #TODO: IMPLEMENT AND SET filters, display_filters and applied_filters.
-        # filters get used in create_query below.  display_filters gets used by display_filters.jinja2 and applied_filters gets used by aggregations.jinja2 (and any other links that would execute a search.)
+        if key:
+            applied_filters += '&{}.key={}'.format(filter, key)
+        if from_:
+            applied_filters += '&{}.from={}'.format(filter, from_)
+        if to:
+            applied_filters += '&{}.to={}'.format(filter, to)
         if type == "range":
-            pass
+            range_filter = {'range': {filter: {}}}
+            minimum = request.args.get(filter + '.from')
+            maximum = request.args.get(filter + '.to')
+            if minimum:
+                range_filter['range'][filter]['gte'] = minimum
+            if maximum:
+                range_filter['range'][filter]['lt'] = maximum
+            filters.append(range_filter)
+            display = ('%s <= ' % minimum if minimum else '') \
+                + display_name \
+                + (' < %s' % maximum if maximum else '')
+            display_filters.append(display)
         elif type == "terms":
-            pass #TODO: IMPLEMENT
+            key = request.args.get(filter + '.key')
+            terms_filter = {'terms': {filter + '.keyword': [key]}}
+            filters.append(terms_filter)
+            display_filters.append('%s = %s' % (filter, key))
     print("Filters: {}".format(filters))
 
     return filters, display_filters, applied_filters
@@ -74,7 +95,8 @@ def query():
         query_obj = create_query("*", [], sort, sortDir)
 
     print("query obj: {}".format(query_obj))
-    response = None   # TODO: Replace me with an appropriate call to OpenSearch
+    response = opensearch.search(body = query_obj, index = 'bbuy_products')
+
     # Postprocess results here if you so desire
 
     #print(response)
@@ -91,10 +113,44 @@ def create_query(user_query, filters, sort="_score", sortDir="desc"):
     query_obj = {
         'size': 10,
         "query": {
-            "match_all": {} # Replace me with a query that both searches and filters
+            'bool': {
+                'must': [
+                    {
+                        "multi_match": {
+                            "query": user_query,
+                            "fields": ["name^100", "shortDescription^50", "longDescription^10", "department"],
+                        }
+                    }
+                ],
+                'filter': filters
+            }
         },
-        "aggs": {
-            #TODO: FILL ME IN
+        'aggs': {
+            "regularPrice": {
+                "range": {
+                    "field": "regularPrice",
+                    "ranges": [
+                        {"key": "$", "to": 5},
+                        {"key": "$$", "from": 5, "to": 25},
+                        {"key": "$$$", "from": 25, "to": 100},
+                        {"key": "$$$$", "from": 100, "to": 500},
+                        {"key": "$$$$$", "from": 500}
+                    ]
+                }
+            },
+            "department": {
+                "terms": {
+                    "size": 10,
+                    "field": "department.keyword",
+                    "missing": "N/A",
+                    "min_doc_count": 0
+                }
+            },
+            "missing_images": {
+                "missing": { "field": "image" }
+            }
         }
     }
+    if user_query == '*':
+        query_obj['query']['bool']['must'] = [{'match_all': {}}]
     return query_obj
